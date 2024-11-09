@@ -5,8 +5,13 @@ use aws_smithy_types_convert::date_time::DateTimeExt;
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use chrono::{DateTime, Utc};
 use clap::Parser;
-use hyper::{Body, Request, Response, Server};
-use hyper::service::{make_service_fn, service_fn};
+use hyper::body::Incoming;
+use http_body_util::Full;
+use bytes::Bytes;
+use hyper::{Request, Response};
+use hyper::server::conn::http1;
+use hyper_util::rt::TokioIo;
+use tokio::net::TcpListener;
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -16,7 +21,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
 use tokio::sync::OnceCell;
 use url::Url;
-
+use std::convert::Infallible;
 
 #[derive(Debug, Serialize)]
 struct TokenRequest {
@@ -226,10 +231,10 @@ impl PkceParams {
 }
 
 async fn handle_callback(
-    req: Request<Body>,
+    req: Request<Incoming>,
     auth_code: Arc<OnceCell<String>>,
     received: Arc<AtomicBool>,
-) -> Result<Response<Body>> {
+) -> Result<Response<Full<Bytes>>, Infallible> {
     let uri = req.uri();
     let query = uri.query().unwrap_or("");
     let params: Vec<(String, String)> = url::form_urlencoded::parse(query.as_bytes())
@@ -243,12 +248,12 @@ async fn handle_callback(
         Ok(Response::builder()
             .status(200)
             .header("Content-Type", "text/html")
-            .body(Body::from(SUCCESS_HTML))
+            .body(Full::new(Bytes::from(SUCCESS_HTML)))
             .unwrap())
     } else {
         Ok(Response::builder()
             .status(400)
-            .body(Body::from("No authorization code received"))
+            .body(Full::new(Bytes::from("No authorization code received")))
             .unwrap())
     }
 }
@@ -259,23 +264,37 @@ async fn perform_device_auth_flow(config: AuthConfig) -> Result<TokenResponse> {
     let received = Arc::new(AtomicBool::new(false));
 
     // Setup local server
+    let listener = TcpListener::bind("127.0.0.1:42069").await?;
     let auth_code_clone = auth_code.clone();
     let received_clone = received.clone();
 
-    let make_svc = make_service_fn(move |_conn| {
-        let auth_code = auth_code_clone.clone();
-        let received = received_clone.clone();
-        
-        async move {
-            Ok::<_, hyper::Error>(service_fn(move |req| {
-                handle_callback(req, auth_code.clone(), received.clone())
-            }))
+    // Spawn the server task
+    tokio::spawn(async move {
+        loop {
+            if received_clone.load(Ordering::SeqCst) {
+                break;
+            }
+
+            if let Ok((stream, _)) = listener.accept().await {
+                let io = TokioIo::new(stream);
+                let auth_code = auth_code_clone.clone();
+                let received = received_clone.clone();
+
+                tokio::task::spawn(async move {
+                    let service = hyper::service::service_fn(move |req| {
+                        handle_callback(req, auth_code.clone(), received.clone())
+                    });
+
+                    if let Err(err) = http1::Builder::new()
+                        .serve_connection(io, service)
+                        .await
+                    {
+                        eprintln!("Error serving connection: {:?}", err);
+                    }
+                });
+            }
         }
     });
-
-    let addr = ([127, 0, 0, 1], 42069).into();
-    let server = Server::bind(&addr).serve(make_svc);
-    println!("Listening on port: 42069");
 
     let redirect_uri = "http://localhost:42069/callback".to_string();
 
@@ -289,19 +308,15 @@ async fn perform_device_auth_flow(config: AuthConfig) -> Result<TokenResponse> {
         ("code_challenge_method", "S256"),
     ])?;
 
-    println!("Opening browser for authentication...");
     webbrowser::open(auth_url.as_str())?;
 
-    // Run server until we receive the code
-    let graceful = server.with_graceful_shutdown(async move {
-        while !received.load(Ordering::SeqCst) {
-            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-        }
-        // Add a small delay to ensure the success page is shown before the server shuts down
-        tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
-    });
-
-    graceful.await?;
+    // Wait for the code
+    while !received.load(Ordering::SeqCst) {
+        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+    }
+    
+    // Add a small delay to ensure the success page is shown
+    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
 
     let code = auth_code
         .get()
@@ -316,8 +331,6 @@ async fn perform_device_auth_flow(config: AuthConfig) -> Result<TokenResponse> {
         code_verifier: pkce.verifier,
     };
 
-    println!("Token request: {:?}", token_request);
-
     let client = reqwest::Client::new();
     let response = client
         .post(&config.token_endpoint)
@@ -326,8 +339,6 @@ async fn perform_device_auth_flow(config: AuthConfig) -> Result<TokenResponse> {
         .await?;
 
     let response_text = response.text().await?;
-    println!("Response: {}", response_text);
-
     let token_response: TokenResponse = serde_json::from_str(&response_text)?;
 
     Ok(token_response)
@@ -337,6 +348,7 @@ async fn get_aws_credentials(id_token: &str, role_arn: &str, session_name: &str)
     let region_provider = RegionProviderChain::default_provider();
     let config = aws_config::defaults(aws_config::BehaviorVersion::latest())
         .region(region_provider)
+        .no_credentials()
         .load()
         .await;
     
@@ -404,16 +416,12 @@ fn extract_email_from_id_token(id_token: &str) -> Result<String> {
     let payload_str = String::from_utf8(payload)?;
     let claims: Value = serde_json::from_str(&payload_str)?;
 
-    println!("Payload: {}", payload_str);
-
     // Try to get email or fall back to subject
     let email = claims.get("email")
         .and_then(|v| v.as_str())
         .or_else(|| claims.get("sub").and_then(|v| v.as_str()))
         .ok_or_else(|| anyhow!("No email or subject found in token"))?;
 
-    println!("Email or Subject: {}", email);
-    
     Ok(email.to_string())
 }
 
@@ -421,7 +429,6 @@ fn export_credentials(creds: &CachedCredentials) {
     println!("export AWS_ACCESS_KEY_ID={}", creds.access_key_id);
     println!("export AWS_SECRET_ACCESS_KEY={}", creds.secret_access_key);
     println!("export AWS_SESSION_TOKEN={}", creds.session_token);
-    println!("export AWS_CREDENTIAL_EXPIRATION={}", creds.expiration);
 }
 
 fn output_credential_process(creds: &CachedCredentials) {
@@ -459,8 +466,6 @@ async fn main() -> Result<()> {
     let session_name = args.role_session_name
         .unwrap_or_else(|| extract_email_from_id_token(&id_token)
             .unwrap_or_else(|_| "default-session".to_string()));
-    
-    println!("Session name: {}", session_name);
 
     let cached_creds = get_aws_credentials(&id_token, &args.role_arn, &session_name).await?;
 
