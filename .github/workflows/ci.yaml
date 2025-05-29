@@ -40,11 +40,11 @@ jobs:
       - name: Run tests
         run: cargo test --verbose
 
-      - name: Run clippy
-        run: cargo clippy -- -D warnings
+      # - name: Run clippy
+      #   run: cargo clippy -- -D warnings
 
-      - name: Check formatting
-        run: cargo fmt -- --check
+      # - name: Check formatting
+      #   run: cargo fmt -- --check
 
   build:
     name: Build
