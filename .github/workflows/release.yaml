@@ -81,7 +81,7 @@ jobs:
           cp target/${{ matrix.target }}/release/oidc-cli.exe release/oidc-cli-${{ matrix.name }}.exe
 
       - name: Upload binary artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: binary-${{ matrix.name }}
           path: release/oidc-cli-*
