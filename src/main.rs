@@ -12,7 +12,6 @@ use hyper::{Request, Response};
 use hyper::server::conn::http1;
 use hyper_util::rt::TokioIo;
 use tokio::net::TcpListener;
-use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Sha256, Digest};
@@ -238,10 +237,8 @@ impl AuthConfig {
 impl PkceParams {
     fn new() -> Self {
         // Generate random verifier
-        let mut rng = rand::thread_rng();
-        let mut buffer = vec![0u8; 32];
-        rng.fill_bytes(&mut buffer);
-        let verifier = URL_SAFE_NO_PAD.encode(&buffer);
+        let buffer: [u8; 32] = rand::random();
+        let verifier = URL_SAFE_NO_PAD.encode(buffer);
 
         // Create challenge
         let mut hasher = Sha256::new();
