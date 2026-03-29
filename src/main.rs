@@ -37,6 +37,7 @@ struct AuthConfig {
     client_id: String,
     auth_endpoint: String,
     token_endpoint: String,
+    device_authorization_endpoint: Option<String>,
     scope: String,
 }
 
@@ -58,6 +59,17 @@ struct TokenResponse {
 struct OidcConfig {
     authorization_endpoint: String,
     token_endpoint: String,
+    device_authorization_endpoint: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct DeviceAuthorizationResponse {
+    device_code: String,
+    user_code: String,
+    verification_uri: String,
+    verification_uri_complete: Option<String>,
+    expires_in: u64,
+    interval: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -114,6 +126,14 @@ struct Args {
     /// Scope
     #[arg(long, default_value = "openid email")]
     scope: String,
+
+    /// Device authorization endpoint (if not using OIDC URL and using device code flow)
+    #[arg(long)]
+    device_auth_endpoint: Option<String>,
+
+    /// Use Authorization Code + PKCE with localhost redirect instead of device code flow
+    #[arg(long)]
+    redirect: bool,
 
     /// Do not write credentials to cache
     #[arg(long,short)]
@@ -193,6 +213,7 @@ impl AuthConfig {
                 client_id: args.client_id.clone(),
                 auth_endpoint: oidc_config.authorization_endpoint,
                 token_endpoint: oidc_config.token_endpoint,
+                device_authorization_endpoint: oidc_config.device_authorization_endpoint,
                 scope: args.scope.clone(),
             })
         } else {
@@ -207,6 +228,7 @@ impl AuthConfig {
                 client_id: args.client_id.clone(),
                 auth_endpoint: auth_endpoint.clone(),
                 token_endpoint: token_endpoint.clone(),
+                device_authorization_endpoint: args.device_auth_endpoint.clone(),
                 scope: args.scope.clone(),
             })
         }
@@ -425,6 +447,72 @@ fn extract_email_from_id_token(id_token: &str) -> Result<String> {
     Ok(email.to_string())
 }
 
+async fn perform_device_code_flow(config: AuthConfig) -> Result<TokenResponse> {
+    let device_auth_endpoint = config.device_authorization_endpoint
+        .ok_or_else(|| anyhow!("Device authorization endpoint not available. Either use --oidc-url with a provider that supports device flow, or supply --device-auth-endpoint."))?;
+
+    let client = reqwest::Client::new();
+
+    let device_auth: DeviceAuthorizationResponse = client
+        .post(&device_auth_endpoint)
+        .form(&[
+            ("client_id", config.client_id.as_str()),
+            ("scope", config.scope.as_str()),
+        ])
+        .send()
+        .await?
+        .json()
+        .await?;
+
+    let open_url = device_auth.verification_uri_complete.as_deref()
+        .unwrap_or(device_auth.verification_uri.as_str());
+
+    eprintln!("\nOpening browser for authentication...");
+    eprintln!("If it doesn't open, go to: {}", device_auth.verification_uri);
+    eprintln!("And enter code: {}", device_auth.user_code);
+    eprintln!();
+
+    if let Err(e) = webbrowser::open(open_url) {
+        eprintln!("Could not open browser: {e}");
+    }
+
+    let mut poll_interval = device_auth.interval.unwrap_or(5);
+    let expires_at = tokio::time::Instant::now() + tokio::time::Duration::from_secs(device_auth.expires_in);
+
+    loop {
+        if tokio::time::Instant::now() >= expires_at {
+            return Err(anyhow!("Device code expired"));
+        }
+
+        tokio::time::sleep(tokio::time::Duration::from_secs(poll_interval)).await;
+
+        let token_response: TokenResponse = client
+            .post(&config.token_endpoint)
+            .form(&[
+                ("grant_type", "urn:ietf:params:oauth:grant-type:device_code"),
+                ("device_code", device_auth.device_code.as_str()),
+                ("client_id", config.client_id.as_str()),
+            ])
+            .send()
+            .await?
+            .json()
+            .await?;
+
+        match token_response.error.as_deref() {
+            None => return Ok(token_response),
+            Some("authorization_pending") => continue,
+            Some("slow_down") => { poll_interval += 5; continue; }
+            Some("access_denied") => return Err(anyhow!("Access denied")),
+            Some("expired_token") => return Err(anyhow!("Device code expired")),
+            Some(err) => return Err(anyhow!(
+                "Token error: {}{}",
+                err,
+                token_response.error_description.map(|d| format!(" - {}", d)).unwrap_or_default()
+            )),
+        }
+    }
+}
+
 fn export_credentials(creds: &CachedCredentials) {
     println!("export AWS_ACCESS_KEY_ID={}", creds.access_key_id);
     println!("export AWS_SECRET_ACCESS_KEY={}", creds.secret_access_key);
@@ -458,7 +546,11 @@ async fn main() -> Result<()> {
     }
 
     let config = AuthConfig::from_args(&args).await?;
-    let tokens = perform_device_auth_flow(config).await?;
+    let tokens = if args.redirect {
+        perform_device_auth_flow(config).await?
+    } else {
+        perform_device_code_flow(config).await?
+    };
     
     let id_token = tokens.id_token
         .ok_or_else(|| anyhow!("No ID token received. Ensure 'openid' is in your scope."))?;
