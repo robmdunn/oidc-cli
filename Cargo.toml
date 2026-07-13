@@ -7,7 +7,7 @@ edition = "2021"
 anyhow = "1.0"
 aws-config = "1.5"
 aws-sdk-sts = "1.49"
-aws-smithy-types-convert = { version = "0.60.8", features = ["convert-chrono"] }
+aws-smithy-types-convert = { version = "0.61.1", features = ["convert-chrono"] }
 base64 = "0.22"
 bytes = "1.0"
 chrono = { version = "0.4", features = ["serde"] }
