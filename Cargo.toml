@@ -8,7 +8,7 @@ anyhow = "1.0"
 aws-config = "1.5"
 aws-sdk-sts = "1.49"
 aws-smithy-types-convert = { version = "0.60.8", features = ["convert-chrono"] }
-base64 = "0.22"
+base64 = "0.23"
 bytes = "1.0"
 chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4.5", features = ["derive"] }
