@@ -11,15 +11,23 @@ updates:
     labels:
       - "dependencies"
       - "rust"
+    groups:
+      cargo:
+        patterns:
+          - "*"
 
   # Update GitHub Actions
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
       interval: "weekly"
-      day: "monday" 
+      day: "monday"
       time: "09:00"
     open-pull-requests-limit: 5
     labels:
       - "dependencies"
       - "github-actions"
+    groups:
+      github-actions:
+        patterns:
+          - "*"

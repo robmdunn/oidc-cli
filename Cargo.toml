@@ -7,12 +7,12 @@ edition = "2021"
 anyhow = "1.0"
 aws-config = "1.5"
 aws-sdk-sts = "1.49"
-aws-smithy-types-convert = { version = "0.60.8", features = ["convert-chrono"] }
+aws-smithy-types-convert = { version = "0.61.1", features = ["convert-chrono"] }
 base64 = "0.23"
 bytes = "1.0"
 chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4.5", features = ["derive"] }
-dirs = "6.0"
+dirs = "7.0"
 http-body-util = "0.1"
 hyper = { version = "1.5", features = ["full"] }
 hyper-util = { version = "0.1", features = ["full"] }
