@@ -131,6 +131,7 @@ jobs:
         with:
           files: release/*
           body_path: release_notes.md
+          generate_release_notes: true
           draft: false
           prerelease: ${{ contains(github.ref_name, '-') }}
         env:
